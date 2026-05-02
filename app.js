@@ -676,9 +676,35 @@
     if (window.innerWidth < 640) {
       const sidebar = document.getElementById('sidebar');
       if (sidebar) sidebar.classList.remove('mindmap-view', 'drawer-open');
+      document.body.classList.remove('mobile-mindmap-home');
+      updateHamburgerIcon();
     } else {
       closeDrawer();
     }
+  }
+
+  function isMobile() { return window.innerWidth < 640; }
+
+  function showMindmapHome() {
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar) sidebar.classList.add('mindmap-view');
+    document.body.classList.add('mobile-mindmap-home');
+    updateHamburgerIcon();
+  }
+
+  function hideMindmapHome() {
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar) sidebar.classList.remove('mindmap-view');
+    document.body.classList.remove('mobile-mindmap-home');
+    updateHamburgerIcon();
+  }
+
+  function updateHamburgerIcon() {
+    const btn = document.getElementById('hamburger-btn');
+    if (!btn) return;
+    const onMap = document.body.classList.contains('mobile-mindmap-home');
+    btn.innerHTML = onMap ? '&#x2715;' : '&#9776;';
+    btn.setAttribute('aria-label', onMap ? 'Close map' : 'Toggle navigation');
   }
 
   /* =========================================================
@@ -770,7 +796,14 @@
     if (hamburger) {
       hamburger.addEventListener('click', function () {
         const sidebar = document.getElementById('sidebar');
-        if (sidebar && sidebar.classList.contains('drawer-open')) {
+        if (!sidebar) return;
+        if (isMobile()) {
+          if (document.body.classList.contains('mobile-mindmap-home')) {
+            hideMindmapHome();
+          } else {
+            showMindmapHome();
+          }
+        } else if (sidebar.classList.contains('drawer-open')) {
           closeDrawer();
         } else {
           openDrawer();
@@ -778,20 +811,27 @@
       });
     }
 
+    // Mobile: mindmap-as-home — start on the map. Tap a node → switch to section view.
+    if (isMobile()) showMindmapHome();
+
+    // Resize: clean up classes that don't belong at the new breakpoint
+    window.addEventListener('resize', function () {
+      if (isMobile()) {
+        closeDrawer();
+      } else {
+        document.body.classList.remove('mobile-mindmap-home');
+        const sidebar = document.getElementById('sidebar');
+        if (sidebar) sidebar.classList.remove('mindmap-view');
+      }
+      updateHamburgerIcon();
+    });
+
     // Backdrop click closes drawer
     const backdrop = document.getElementById('drawer-backdrop');
     if (backdrop) {
       backdrop.addEventListener('click', closeDrawer);
     }
 
-    // Mobile: show mindmap button
-    const mindmapBtn = document.getElementById('mindmap-btn');
-    if (mindmapBtn) {
-      mindmapBtn.addEventListener('click', function () {
-        const sidebar = document.getElementById('sidebar');
-        if (sidebar) sidebar.classList.toggle('mindmap-view');
-      });
-    }
 
     // Modal close
     const modalClose = document.getElementById('diagram-modal-close');

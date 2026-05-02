@@ -236,14 +236,25 @@ body {
     transform: translateX(-100%);
     transition: transform .22s ease;
     z-index: 90;
+    background: var(--bg);
   }
 
   #sidebar.mindmap-view {
     transform: translateX(0);
   }
 
+  #mindmap-container {
+    min-height: calc(100vh - var(--header-h) - 32px);
+  }
+
   #main-content {
     padding: 16px;
+  }
+
+  /* When the mindmap is the home view, hide section content beneath it
+     so back-navigation feels like a discrete view switch. */
+  body.mobile-mindmap-home #main-content {
+    visibility: hidden;
   }
 }
 
