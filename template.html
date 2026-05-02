@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{TITLE}}</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <!-- Vendor JS (CDN, pinned to minor) -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/markmap-autoloader@0.18"></script>
+  <script src="https://cdn.jsdelivr.net/npm/panzoom@9.4/dist/panzoom.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/markdown-it@14/dist/markdown-it.min.js"></script>
+  <!-- Alpine last, deferred -->
+  <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14/dist/cdn.min.js" defer></script>
+
+  <!-- Embedded data (agent-substituted) -->
+  <script type="application/json" id="primer-sections">{{SECTIONS_JSON}}</script>
+  <script type="application/json" id="primer-mindmap">{{MINDMAP_JSON}}</script>
+  <script type="application/json" id="primer-glossary">{{GLOSSARY_JSON}}</script>
+
+  <!-- Inlined styles (agent substitutes styles.css content here) -->
+  {{STYLES_INLINE}}
+</head>
+<body>
+
+<div id="app-shell">
+
+  <!-- =========================================================
+       Header
+       ========================================================= -->
+  <header id="site-header" role="banner">
+    <button id="hamburger-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+    <h1>{{TITLE}}</h1>
+    <div class="header-controls">
+      <input
+        id="search-input"
+        type="search"
+        placeholder="Search… (/)"
+        aria-label="Search sections"
+        autocomplete="off"
+      >
+      <button id="dark-toggle" class="icon-btn" aria-label="Toggle dark mode">
+        <span id="dark-toggle-icon">☾</span>
+      </button>
+      <button id="print-btn" class="icon-btn" aria-label="Print">Print</button>
+    </div>
+  </header>
+
+  <!-- Backdrop for drawer (tablet) -->
+  <div id="drawer-backdrop" aria-hidden="true"></div>
+
+  <!-- =========================================================
+       Content area
+       ========================================================= -->
+  <div id="content-area">
+
+    <!-- Sidebar / mindmap -->
+    <nav id="sidebar" aria-label="Document map">
+      <div id="mindmap-container" aria-label="Mind map" role="img">
+        <!-- markmap renders here; fallback below -->
+        <ul id="toc-fallback" aria-label="Table of contents">
+          <!-- Populated by app.js if markmap unavailable -->
+        </ul>
+      </div>
+    </nav>
+
+    <!-- Main content -->
+    <main id="main-content" role="main">
+
+      <!-- Sections list -->
+      <div id="sections-container" role="list" aria-label="Document sections">
+        <!-- Populated by app.js -->
+        <noscript>
+          <p style="padding:16px;color:#555">
+            JavaScript is required to render this document interactively.
+            Enable JS or open the source markdown directly.
+          </p>
+        </noscript>
+      </div>
+
+      <!-- Glossary -->
+      <section id="glossary-section" aria-labelledby="glossary-heading">
+        <h2 id="glossary-heading">Glossary</h2>
+        <dl class="glossary-list" id="glossary-list">
+          <!-- Populated by app.js -->
+        </dl>
+      </section>
+
+      <!-- Footer -->
+      <footer id="site-footer">
+        Generated <time>{{GENERATED_AT}}</time> &middot; primer
+      </footer>
+
+    </main>
+  </div><!-- #content-area -->
+
+</div><!-- #app-shell -->
+
+<!-- Diagram zoom modal -->
+<div id="diagram-modal" role="dialog" aria-modal="true" aria-label="Diagram zoom">
+  <div id="diagram-modal-inner">
+    <button id="diagram-modal-close" aria-label="Close diagram">&#x2715;</button>
+    <div id="diagram-modal-svg-wrap"></div>
+  </div>
+</div>
+
+<!-- Inlined app JS (agent substitutes app.js content here) -->
+{{APP_JS_INLINE}}
+
+</body>
+</html>

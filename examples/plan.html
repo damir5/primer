@@ -1,0 +1,1814 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Plan: `primer` — interactive plan/doc explainer</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <!-- Vendor JS (CDN, pinned to minor) -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/markmap-autoloader@0.18"></script>
+  <script src="https://cdn.jsdelivr.net/npm/panzoom@9.4/dist/panzoom.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/markdown-it@14/dist/markdown-it.min.js"></script>
+  <!-- Alpine last, deferred -->
+  <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14/dist/cdn.min.js" defer></script>
+
+  <!-- Embedded data (agent-substituted) -->
+  <script type="application/json" id="primer-sections">[{"id":"intro","title":"Plan: `primer` — interactive plan/doc explainer","level":1,"bodyMd":"","tldr":"Plan to build the primer skill — a tool that turns a markdown plan into an interactive HTML explainer.","eli5":"Plan to build the primer skill — a tool that turns a markdown plan into an interactive HTML explainer.","questions":[],"diagrams":[],"fromOverride":{}},{"id":"context","title":"Context","level":2,"bodyMd":"User wants a tool that ingests a markdown plan (PRD, RFC, architecture doc, pitch) and produces a single shareable, interactive HTML page that helps a reader understand it: progressive disclosure (TL;DR-first), an LLM-generated logical mindmap as navigation, mermaid diagrams (author-supplied or AI-inferred-and-badged), responsive layout (mobile/tablet/desktop), Linear-inspired light theme with dark mode.\n\nExisting tools were investigated and rejected (LiaScript, Quarto+Closeread, Slidev, NotebookLM, Gamma) — none match the dual learn-first / future-pitch shape with auto-generated mindmap and the agent-driven LLM constraint.\n\nThe tool is **agent-driven**: it ships as a Claude Code skill that any agent (Claude Code primarily; Codex / Gemini CLI via recipe) can execute. **No Deno, no `~/bin`, no CLI binary, no API keys handled by the tool.** The agent IS the runtime.\n\nDistribution = `git clone <repo> ~/.claude/skills/primer`. Updates = `git pull`.\n\nV1 is **learn-mode only**. Pitch mode is deferred — Codex's collab2 finding (learn ≠ pitch as data shapes) and the consistent flaw the self-critiques surfaced: \"two products fighting in one binary\".\n\n---","tldr":"primer fills a gap between read-the-doc tools and pitch decks by producing one shareable interactive learn-first HTML page driven by an agent rather than a CLI.","eli5":"Existing tools either drown a reader in academic structure (Quarto, LiaScript) or push a pitch deck (Gamma, Slidev). None auto-build a logical mindmap from a markdown plan and let a reader expand each section on demand.\n\nThe key decision here: primer is not a separate program with its own API keys and runtime. It is a skill that any LLM agent (Claude Code, Codex, Gemini CLI) follows step-by-step. The agent IS the runtime.\n\nVersion 1 is learn-mode only. The \"pitch\" idea is a different product and gets deferred until version 1 ships.","questions":["Why split learn-mode and pitch-mode rather than ship one tool with a flag?","What real cost does the agent-as-runtime model trade away?"],"diagrams":[],"fromOverride":{}},{"id":"repo-install-layout","title":"Repo / install layout","level":2,"bodyMd":"```\n~/.claude/skills/primer/                  # the entire product\n├── SKILL.md                              # YAML frontmatter + prescriptive recipe\n├── README.md                             # human-facing: install, cost, caveats\n├── template.html                         # static template with {{SLOTS}}\n├── styles.css                            # Linear-inspired theme; light + dark + print\n├── app.js                                # Alpine components, navigation, persistence, keyboard\n├── assets/\n│   └── prompts/\n│       ├── outline.md                    # pass-1 prompt (whole-plan context + mindmap tree + glossary)\n│       └── enrich.md                     # pass-2 prompt (per-section TL;DR / ELI5 / Q / inferred-diagram)\n├── references/\n│   └── json-contracts.md                 # exact JSON schemas; parse-failure fallbacks\n└── examples/\n    ├── plan.md                           # sample input\n    └── plan.html                         # committed reference output\n```\n\nNaming follows the local skill convention from the Phase-1 survey (`assets/`, `references/`, frontmatter required).\n\n---","tldr":"The whole product is one directory of static assets — SKILL.md, a template, CSS, JS, two prompts, schemas, examples — installed via git clone and a symlink into the local skills directory.","eli5":"There is no compile step, no install script, no daemon. You clone a repo and link it into your Claude Code skills folder. The directory follows the local skill convention: assets/ for prompts, references/ for on-demand schemas, frontmatter required at the top of SKILL.md.","questions":[],"diagrams":[],"fromOverride":{}},{"id":"skill-md-shape","title":"SKILL.md shape","level":2,"bodyMd":"```yaml\n---\nname: primer\ndescription: Use when the user wants to turn a markdown plan, PRD, RFC, or architecture doc into an interactive HTML explainer with progressive disclosure, mindmap navigation, and AI-enriched section summaries. Invoke on any path ending in .md when the user asks to \"make this readable\", \"build a primer\", \"render this plan as HTML\", \"create a learning doc\", or \"give me an explainer\".\n---\n```\n\nBody of SKILL.md is **prescriptive** (no improvisation):\n\n1. **Inputs** — `<input>.md`\n2. **Outputs** — `<input>.html` and `<input>.primer.cache.json` next to source\n3. **Steps** — numbered, with exact filenames + hash specs:\n   1. Read MD; split by `--split-on` (default H2; fallback H1 if no H2; never below H3)\n   2. Scan body for `<!-- primer:tldr \"...\" -->`, `<!-- primer:eli5 \"...\" -->`, `<!-- primer:skip-diagram -->` overrides\n   3. Compute `plan_hash = sha256(full_md_normalized)` and `section_hash[i] = sha256(section_content_normalized)`\n   4. Load `<input>.primer.cache.json` if exists\n   5. **Pass 1**: if `cache.outline.plan_hash != plan_hash`, prompt with `assets/prompts/outline.md` + full MD → JSON `{summary, mindmap_tree, glossary[]}`. Validate against schema. On parse-fail: retry once with explicit \"return only JSON\" reminder; then fall back to heading-tree mindmap and empty summary.\n   6. **Pass 2**: parallel ≤4 concurrent calls. Per cache-miss section (key = `section_hash + outline_hash`): prompt with `assets/prompts/enrich.md` + outline.summary + section content → JSON `{tldr, eli5, questions[], diagram?}`. On parse-fail: retry once; then store `{tldr: null, error: \"enrichment failed\"}` and continue (UI shows section without TL;DR).\n   7. Sections >8K tokens: split at paragraph boundaries, summarize parts, then summarize-of-summaries.\n   8. Merge author overrides field-by-field (override wins).\n   9. Render: read `template.html`, inline `styles.css` and `app.js` as `<style>`/`<script>`, substitute `{{TITLE}}`, `{{SECTIONS_JSON}}`, `{{MINDMAP_JSON}}`, `{{GLOSSARY_JSON}}`, `{{GENERATED_AT}}`.\n   10. Write `<input>.html` and updated cache file.\n4. **Constraints** — DO NOT modify `template.html`, `styles.css`, `app.js`, or any vendor reference. DO NOT skip caching. DO NOT exceed 4 concurrent enrichment calls. DO NOT inline AI-inferred diagrams without `inferred: true` flag.\n5. **Examples** — link to `examples/plan.md` → `examples/plan.html`.\n\nDetailed JSON schemas live in `references/json-contracts.md` (loaded into agent context only when needed).\n\n---","tldr":"SKILL.md is a prescriptive ten-step recipe — read, split, hash, outline pass, enrich pass, chunk, override, render — with explicit DO and DO NOT constraints to prevent agent improvisation.","eli5":"Think of SKILL.md as a checklist for the agent. Steps cover reading the file, finding override comments, hashing content, loading the cache, doing the outline pass, deriving an outline hash, enriching each section in parallel, chunking anything too long, applying author overrides, and rendering.\n\nThe constraints (do not modify static files, do not skip cache, max four enrichment calls in flight, never inline an inferred diagram without flagging it) are guardrails so different LLM agents produce identical output for identical input.","questions":["What happens when an agent silently skips a step it thinks is redundant?","How does the agent count tokens for the eight-thousand-token chunk threshold?"],"diagrams":[{"kind":"mermaid","code":"flowchart TD\n  A[Read MD] --> B[Extract overrides]\n  B --> C[Hash plan + sections]\n  C --> D[Load cache]\n  D --> E{plan_hash<br/>changed?}\n  E -->|yes| F[Pass 1: outline]\n  E -->|no| G[Reuse outline]\n  F --> H[Hash outline]\n  G --> H\n  H --> I[Pass 2: enrich each section]\n  I --> J[Chunk if &gt;8K tokens]\n  J --> K[Merge author overrides]\n  K --> L[Render template]\n  L --> M[Write HTML + cache]","inferred":true}],"fromOverride":{}},{"id":"section-data-model-rendered-as-embedded-json","title":"Section data model (rendered as embedded JSON)","level":2,"bodyMd":"```ts\ntype Section = {\n  id: string;                    // slug from title\n  title: string;\n  level: 1|2|3;\n  bodyMd: string;                // raw MD; rendered client-side via markdown-it CDN\n  tldr: string | null;\n  eli5: string | null;\n  questions: string[];\n  diagrams: Array<{\n    kind: \"mermaid\";             // markmap kept for nav only; section diagrams = mermaid\n    code: string;\n    inferred: boolean;\n  }>;\n  fromOverride: { tldr?: true; eli5?: true; skipDiagram?: true };\n};\n\ntype Outline = {\n  summary: string;\n  mindmap_tree: { id: string; label: string; children: MindmapNode[] };\n  glossary: Array<{ term: string; definition: string }>;\n};\n```\n\n`{{SECTIONS_JSON}}` and `{{MINDMAP_JSON}}` are embedded as `<script type=\"application/json\" id=\"...\">` blocks; Alpine reads on init.\n\n**Markdown rendering**: client-side via markdown-it from CDN. Agent's job is enrichment, not parsing — stays out of HTML escaping / code-block / table edge cases.\n\n---","tldr":"Sections are typed records carrying raw bodyMd plus optional tldr, eli5, questions and diagrams; markdown rendering happens client-side via markdown-it, keeping the agent out of HTML edge cases.","eli5":"Each section is data, not pre-rendered HTML. The agent ships raw markdown plus the enrichments it produced. The browser renders the markdown with markdown-it on load. This means the agent never has to escape code blocks, tables, or HTML inside markdown — that responsibility lives in a battle-tested library at view time.","questions":["Why client-side markdown rendering instead of pre-rendering at agent time?"],"diagrams":[{"kind":"mermaid","code":"classDiagram\n  class Section {\n    string id\n    string title\n    int level\n    string bodyMd\n    string? tldr\n    string? eli5\n    string[] questions\n    Diagram[] diagrams\n  }\n  class Diagram {\n    string kind\n    string code\n    bool inferred\n  }\n  class Outline {\n    string summary\n    MindmapNode mindmap_tree\n    GlossaryEntry[] glossary\n  }\n  Section \"1\" o-- \"*\" Diagram","inferred":true}],"fromOverride":{}},{"id":"cdn-dependencies-pinned-to-minor","title":"CDN dependencies (pinned to minor)","level":2,"bodyMd":"In `template.html` `<head>`:\n```html\n<link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap\" rel=\"stylesheet\">\n<script src=\"https://cdn.jsdelivr.net/npm/alpinejs@3.14/dist/cdn.min.js\" defer><\/script>\n<script src=\"https://cdn.jsdelivr.net/npm/mermaid@10.9/dist/mermaid.min.js\"><\/script>\n<script src=\"https://cdn.jsdelivr.net/npm/markmap-autoloader@0.18\"><\/script>\n<script src=\"https://cdn.jsdelivr.net/npm/panzoom@9.4/dist/panzoom.min.js\"><\/script>\n<script src=\"https://cdn.jsdelivr.net/npm/markdown-it@14/dist/markdown-it.min.js\"><\/script>\n```\n\nTradeoff documented in README: requires internet at view time. If user needs offline-shareable output, they can run a one-shot `monolith` post-processor — out of scope for v1.\n\n---","tldr":"Vendor JS comes from cdn.jsdelivr.net pinned to minor versions — Alpine, mermaid, markmap, panzoom, markdown-it — plus Inter and JetBrains Mono fonts.","eli5":"The output HTML pulls libraries from a CDN at view time. This makes the file tiny, but readers need internet access to render it. If you need an offline copy, run a one-shot bundler like monolith afterwards. That step is out of scope for v1.","questions":["What is the fallback if a pinned CDN version gets yanked?","Could vendor bundling be a switchable flag later?"],"diagrams":[],"fromOverride":{}},{"id":"ui-behavior","title":"UI behavior","level":2,"bodyMd":"ASCII layout (desktop ≥1024px):\n```\n┌─────────────────────────────────────────────────────────────────┐\n│ Title                              [☼/☾]  [🖨 print]  [search] │\n├──────────────┬──────────────────────────────────────────────────┤\n│              │                                                  │\n│  mindmap     │   §1 Title                                       │\n│  (markmap)   │   ──────────                                     │\n│              │   TL;DR italic — 1–2 lines                       │\n│  ▸ A         │   [Original] [ELI5] [Questions] [Diagram]        │\n│    ▸ A.1     │   ↓ expanded body (markdown-rendered)            │\n│    ▸ A.2     │                                                  │\n│  ▸ B         │   §2 Title                                       │\n│  ▸ C         │   ──────────                                     │\n│              │   TL;DR italic — 1–2 lines                       │\n│              │   [Original] [ELI5] [Questions] [Diagram]        │\n│              │                                                  │\n└──────────────┴──────────────────────────────────────────────────┘\n```\n\n- **Tablet (640–1023px)**: mindmap collapses to drawer, hamburger toggle.\n- **Mobile (<640px)**: mindmap is full-screen home; tap node → section view; back returns to mindmap.\n\n**Default view = TL;DR-first list** (each section row shows heading + TL;DR + tab-availability dots). Click row = expand inline + tab strip appears.\n\n**Tabs**: `Original | ELI5 | Questions | Diagram`. Keyboard `1`–`4` switches, `j/k` next/prev section, `/` focus search, `esc` close diagram zoom, `d` toggle dark mode.\n\n**Mindmap source** — fallback chain:\n1. LLM `outline.mindmap_tree` if pass-1 succeeded and validates\n2. Heading hierarchy from MD if pass-1 failed\n3. Flat TOC list if heading depth ≤ 1\n\n**AI-inferred diagram badge**: rendered into the mermaid SVG itself (top-right corner, `<text>` element) so it survives screenshots — not just a `<div>` above the diagram.\n\n**Diagram zoom**: click → modal with panzoom. Pinch-zoom on mobile.\n\n**Persistence**: `localStorage[primer:<sha256(input_md).slice(0,16)>]` stores `{darkMode, expandedSections[], lastSection}`. Keyed by content hash so the same plan moved between paths keeps state.\n\n**Print mode**: `?print=1` URL — expands all sections, hides nav, awaits all `mermaid.run()` promises before paint. Document this in README; native `Cmd-P` is best-effort.\n\n**Glossary**: rendered as a dedicated section at the bottom (no hover-tooltips in v1 — false-positive risk in code/links isn't worth it).\n\n**Dark mode**: `@media (prefers-color-scheme: dark)` baseline + manual toggle button persisted in localStorage.\n\n**Accessibility baseline**:\n- Native `<details>` / `<summary>` for collapsibles (free a11y)\n- Semantic `<nav>` / `<main>` / `<article>`\n- Focus management on tab swap\n- Mode/dark-mode toggles keyboard-accessible\n- Mindmap has TOC list fallback when JS off\n\n---","tldr":"Default view is a TL;DR-first list per section; clicking expands inline tabs (Original, ELI5, Questions, Diagram); markmap nav sits beside on desktop, in a drawer on tablet, full-screen-first on mobile.","eli5":"Open the page and you see one row per section, each with its TL;DR. Click a row, it expands and shows tabs: the original markdown, an ELI5 rewrite, suggested questions, and a diagram. Keyboard shortcuts: 1 through 4 switch tabs, j and k jump sections, slash focuses search.\n\nOn smaller screens the side mindmap turns into a drawer or a full-screen home page that you tap into.\n\nThere is a print mode that opens everything for Cmd-P and a dark mode that respects your OS preference and a manual toggle.","questions":["How does the markmap behave when the LLM-derived tree is wrong?","What does the page do if mermaid fails to load from the CDN?"],"diagrams":[],"fromOverride":{}},{"id":"theme-tokens-linear-inspired","title":"Theme tokens (Linear-inspired)","level":2,"bodyMd":"Light:\n```\n--bg:#fafafa; --bg-elev:#fff; --fg:#0a0a0a; --fg-muted:#5a5a5a;\n--accent:#5e6ad2; --accent-soft:#eef0fb;\n--border:#ececec; --shadow:0 1px 2px rgba(0,0,0,.04),0 8px 24px rgba(0,0,0,.04);\n--radius:8px;\n--mono:\"JetBrains Mono\",ui-monospace,monospace;\n--sans:\"Inter\",-apple-system,system-ui,sans-serif;\n```\n\nDark (toggled via `prefers-color-scheme` or `.dark` on `<body>`):\n```\n--bg:#0e0f12; --bg-elev:#16181d; --fg:#e8e8ea; --fg-muted:#8a8e96;\n--accent:#7a82e8; --accent-soft:#1c1f33; --border:#23252c;\n```\n\nTypography: Inter 16/1.6, max-width 68ch; headings 600 weight, tight tracking; TL;DR italic with accent left-border; inline code soft-bg pill in JetBrains Mono 14px; links underline-on-hover only.\n\n---","tldr":"Linear-inspired theme: muted near-white backgrounds, accent #5e6ad2, Inter for prose at 16/1.6, JetBrains Mono for code, 8 px radius and soft shadows, with a parallel dark palette.","eli5":"Calm typography-first design with one accent color. Light mode is near-white on white, dark mode is a deep navy. No gradients, no skeumorphism. Inter for reading, JetBrains Mono for code, max line length capped so prose stays readable.","questions":[],"diagrams":[],"fromOverride":{}},{"id":"cost-scale-documented-in-readme","title":"Cost / scale (documented in README)","level":2,"bodyMd":"- Pass 1: one LLM call per plan. ~5K input + ~1K output. Sonnet 4.6 ≈ $0.03.\n- Pass 2: one call per section. ~500 input + ~300 output. 30 sections ≈ $0.20.\n- Total first run: **~$0.25/plan** (Sonnet 4.6). Re-runs hit cache → ~$0.\n- Token budget: cap at 100 sections per plan (fail loudly above that).\n\n---","tldr":"First run on a typical 30-section plan costs about 25 cents on Sonnet 4.6; cached re-runs cost nothing; the tool refuses plans with more than 100 sections.","eli5":"The math: pass 1 reads the whole plan once and returns a small outline (~3 cents). Pass 2 reads each section plus the outline summary and returns its enrichment (~30 sections × ~0.7 cents ≈ 20 cents). Total ~25 cents.\n\nAfter the first run the cache covers everything, so editing one section re-enriches only that section.","questions":["What does a cached re-run after editing every section cost?","Is there a way to estimate cost up-front, before pass 1?"],"diagrams":[],"fromOverride":{}},{"id":"build-phases-with-completion-criteria","title":"Build phases — with completion criteria","level":2,"bodyMd":"| # | Phase | Done means |\n|---|-------|------------|\n| 1 | Template + theme + Alpine wiring (no LLM) | Hand-written `examples/plan.html` renders correctly across desktop/tablet/mobile breakpoints; dark mode toggles; tabs work; `<details>` collapsibles work; markmap nav clicks scroll to sections |\n| 2 | Prompts + JSON contracts | `outline.md` and `enrich.md` written; manual run via Claude on a real plan produces valid JSON against schemas in `references/json-contracts.md` |\n| 3 | SKILL.md recipe | Agent (Claude Code) end-to-end on a real plan from `~/dev/web/fisco/doc/`, no human in loop, valid HTML output, valid cache file |\n| 4 | Cache + author overrides + glossary section | Re-run hits cache (no LLM calls); HTML override comments respected; glossary section renders at bottom |\n| 5 | Print mode + dark mode + a11y baseline | `?print=1` produces clean print output with diagrams rendered; keyboard nav works; screen reader announces section structure |\n| 6 | README + reference example committed | README with install + cost + caveats; `examples/plan.html` committed |\n\n**Phase 7 (deferred / not v1)**: pitch mode. Revisit after one real plan ships and user actually wants it.\n\n---","tldr":"Six phases with explicit done-criteria — template+theme, prompts+contracts, SKILL.md recipe, cache+overrides+glossary, print+dark+a11y, README+example — with pitch mode deferred to phase 7.","eli5":"Each phase ships against a clear definition of done. Phase 1 a hand-rolled HTML page renders correctly across breakpoints with no LLM in the loop. Phase 2 the prompts return valid JSON against the schemas. Phase 3 an agent runs the recipe end-to-end on a real plan. Phase 4 cache and override comments are working. Phase 5 print mode and the accessibility baseline land. Phase 6 README and the reference example get committed. Pitch mode is a future, separate product.","questions":["Why six phases instead of one big ship?"],"diagrams":[{"kind":"mermaid","code":"flowchart LR\n  P1[Phase 1<br/>Template + theme] --> P2[Phase 2<br/>Prompts + contracts]\n  P2 --> P3[Phase 3<br/>SKILL.md recipe]\n  P3 --> P4[Phase 4<br/>Cache + overrides]\n  P4 --> P5[Phase 5<br/>Print + dark + a11y]\n  P5 --> P6[Phase 6<br/>README + example]\n  P6 -.deferred.-> P7[Phase 7<br/>Pitch mode]","inferred":true}],"fromOverride":{}},{"id":"critical-files-to-create","title":"Critical files to create","level":2,"bodyMd":"- `~/.claude/skills/primer/SKILL.md` (new — recipe)\n- `~/.claude/skills/primer/template.html` (new — single-file output template)\n- `~/.claude/skills/primer/styles.css` (new — theme)\n- `~/.claude/skills/primer/app.js` (new — Alpine + interactions)\n- `~/.claude/skills/primer/assets/prompts/outline.md` (new — pass-1 prompt)\n- `~/.claude/skills/primer/assets/prompts/enrich.md` (new — pass-2 prompt)\n- `~/.claude/skills/primer/references/json-contracts.md` (new — schemas)\n- `~/.claude/skills/primer/examples/plan.md` (new — sample input)\n- `~/.claude/skills/primer/examples/plan.html` (new — committed reference output)\n- `~/.claude/skills/primer/README.md` (new — human-facing)\n\nThe skill dir will live in `~/dev/pico/primer/` as a git repo, symlinked to `~/.claude/skills/primer/` (matches the existing pattern for tools that double as skills, e.g. `ask-human`).","tldr":"Ten files under the skill directory: SKILL.md, template.html, styles.css, app.js, two prompts, json-contracts, two example files, and README.","eli5":"Everything you need to build, run, and document the skill, listed by path. Each file has a single owner: the skill recipe is one file, the renderer is three (template plus CSS plus JS), the LLM contracts are three (two prompts plus one schema reference), and there is an example pair plus a README.","questions":[],"diagrams":[],"fromOverride":{}},{"id":"patterns-to-reuse","title":"Patterns to reuse","level":2,"bodyMd":"- **Skill frontmatter + structure**: from local skills convention surveyed in Phase 1 (`name`, `description`, prescriptive body, `assets/` + `references/` subdirs).\n- **JSON parse robustness**: copy the strip-fences-then-scan-for-first-valid-object trick from `~/dev/pico/brief/src/summarize.ts:extractJsonPayload` (referenced, not imported — different runtime).\n- **Markdown chunking on long sections**: the chunking idea (not the code) from `~/dev/pico/brief/src/chunk.ts`.\n- **Section override comments**: same `<!-- name:key \"value\" -->` shape used elsewhere in the user's tools.\n\n---","tldr":"Borrows three patterns from existing local tools — skill frontmatter convention, a JSON parse-robustness algorithm from brief, and the override-comment shape used in other tools — without importing code.","eli5":"Do not reinvent. The skill follows the same frontmatter format used by other local skills. The strip-fences-and-scan-for-first-valid-JSON trick was already worked out in a previous tool called brief. The override comment shape is something the user already uses elsewhere. References, not imports — different runtime.","questions":[],"diagrams":[],"fromOverride":{}},{"id":"verification","title":"Verification","level":2,"bodyMd":"End-to-end smoke (Phase 3 done):\n1. Pick a real plan: `~/dev/web/fisco/doc/fisk2.txt` (or any `.md` in that tree)\n2. From Claude Code: invoke the primer skill on that file\n3. Open the resulting `.html` in Chrome\n4. Check: (a) mindmap renders and nav works; (b) TL;DRs visible by default; (c) expand reveals tabs; (d) at least one mermaid diagram renders (author-supplied or inferred-with-badge); (e) dark-mode toggle works; (f) `?print=1` produces clean print preview; (g) cache file written next to source\n5. Resize Chrome to 768px and 375px — verify tablet/mobile behavior\n6. Re-run the skill on the same file — confirm zero LLM calls (cache hit)\n7. Edit one section's body — re-run — confirm only that one section re-enriched\n\nLighthouse a11y score ≥ 90 on the reference output (Phase 5 done).\n\n---","tldr":"End-to-end smoke: run the skill on a real plan, open the HTML, confirm seven UI behaviors (mindmap, TL;DR, tabs, mermaid, dark, print, cache file), then re-run for cache-hit and edit one section for partial re-enrichment.","eli5":"After phase 3 you do the big test. Pick a real plan, invoke the skill, open the result in Chrome. You should see the mindmap render, TL;DRs by default, tabs switch on click, at least one mermaid diagram render, dark mode toggle, a clean print preview, and a cache file written next to the source.\n\nThen re-run on the same file: zero LLM calls. Edit one section: only that section re-enriches.","questions":[],"diagrams":[],"fromOverride":{}},{"id":"architectural-decisions-summary","title":"Architectural decisions summary","level":2,"bodyMd":"| Decision | Choice | Why |\n|---|---|---|\n| Package | Pure Claude Code skill, no Deno binary | Zero-install via `git clone`; matches local skill convention |\n| Distribution | `~/dev/pico/primer/` git repo, symlinked into `~/.claude/skills/primer` | Mirrors `ask-human` pattern; reusable across machines |\n| Runtime | The agent (Claude/Codex/Gemini) executes the recipe | No subprocess overhead, no shell-injection, no API key handling |\n| Vendor JS | CDN-only (jsdelivr), pinned to minor | Tiny output HTML; tradeoff: needs internet at view time |\n| LLM passes | 2: outline (whole-plan) + per-section enrichment | Fixes \"sections aren't independent\" oversight |\n| Markdown render | Client-side via markdown-it CDN | Agent stays out of HTML edge cases |\n| Mindmap source | LLM logical grouping, with heading-tree and flat-TOC fallbacks | Heading-tree fails on flat plans |\n| Section diagrams | Mermaid only (markmap reserved for nav) | Simpler model |\n| AI-inferred diagrams | On, badge drawn into SVG itself | Survives screenshot crops |\n| Cache | Two-key: `sha256(section)` + `sha256(outline)` | Re-runs cheap; correctly invalidates on plan-context shift |\n| Author overrides | `<!-- primer:tldr \"...\" -->` comments | Escape hatch when LLM is wrong |\n| Modes | Learn-only in v1; pitch deferred or cut | Avoids the \"two products in one binary\" trap |\n| Theme | Linear-inspired light + dark + print, Inter + JetBrains Mono | Clean, typography-first |\n| Frontend | Vanilla + Alpine.js (CDN) | No build step, declarative |\n| A11y | Native `<details>`, semantic landmarks, keyboard, TOC fallback | Cheap to do early |\n| Cost target | ~$0.25 first run, ~$0 cached, fail above 100 sections | Predictable + bounded |","tldr":"Sixteen decisions captured as a table — package, runtime, vendor strategy, LLM passes, render layer, mindmap source, diagram policy, cache, overrides, modes, theme, frontend, accessibility, cost target — each with a one-line reason.","eli5":"The bottom line of the design. Each row says what was decided and why. If you want the architecture without reading the rest, this is the section.","questions":["Which of these decisions is most likely to be wrong in a year?"],"diagrams":[],"fromOverride":{}}]</script>
+  <script type="application/json" id="primer-mindmap">{"id":"root","label":"primer skill","children":[{"id":"why","label":"Why","children":[{"id":"gap","label":"Gap in existing tools"},{"id":"agent-driven","label":"Agent is the runtime"}]},{"id":"package","label":"Package & install","children":[{"id":"repo-layout","label":"Repo layout"},{"id":"cdn-deps","label":"CDN dependencies"}]},{"id":"recipe","label":"Recipe","children":[{"id":"skill-md","label":"SKILL.md procedure"},{"id":"data-model","label":"Section data model"},{"id":"patterns","label":"Patterns reused"}]},{"id":"ui","label":"UI","children":[{"id":"behavior","label":"Layout & behavior"},{"id":"theme","label":"Theme tokens"}]},{"id":"ops","label":"Operations","children":[{"id":"cost","label":"Cost & scale"},{"id":"phases","label":"Build phases"},{"id":"files","label":"Critical files"},{"id":"verify","label":"Verification"},{"id":"decisions","label":"Decisions summary"}]}]}</script>
+  <script type="application/json" id="primer-glossary">[{"term":"Mindmap","definition":"A logical hierarchical navigation tree that clusters related sections, distinct from the literal heading tree."},{"term":"ELI5","definition":"A plain-language rewrite of a section, free of jargon, intended for readers unfamiliar with the domain."},{"term":"Inferred diagram","definition":"A mermaid diagram produced by the LLM from a section’s prose rather than authored by the writer."},{"term":"Author override","definition":"An HTML comment in the source markdown that fixes a TL;DR or ELI5 or skips diagram inference for a section."},{"term":"Two-pass enrichment","definition":"A pipeline that first reads the whole plan to produce an outline, then enriches each section with the outline as context."}]</script>
+
+  <!-- Inlined styles (agent substitutes styles.css content here) -->
+  <style>
+/* primer — Linear-inspired theme */
+
+/* =========================================================
+   Custom properties
+   ========================================================= */
+
+:root {
+  --bg: #fafafa;
+  --bg-elev: #fff;
+  --fg: #0a0a0a;
+  --fg-muted: #5a5a5a;
+  --accent: #5e6ad2;
+  --accent-soft: #eef0fb;
+  --border: #ececec;
+  --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.04);
+  --radius: 8px;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+  --sans: "Inter", -apple-system, system-ui, sans-serif;
+
+  --sidebar-w: 260px;
+  --header-h: 52px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e0f12;
+    --bg-elev: #16181d;
+    --fg: #e8e8ea;
+    --fg-muted: #8a8e96;
+    --accent: #7a82e8;
+    --accent-soft: #1c1f33;
+    --border: #23252c;
+  }
+}
+
+body.dark {
+  --bg: #0e0f12;
+  --bg-elev: #16181d;
+  --fg: #e8e8ea;
+  --fg-muted: #8a8e96;
+  --accent: #7a82e8;
+  --accent-soft: #1c1f33;
+  --border: #23252c;
+}
+
+/* =========================================================
+   Reset + base
+   ========================================================= */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--fg);
+  background: var(--bg);
+  min-height: 100vh;
+}
+
+/* =========================================================
+   Layout
+   ========================================================= */
+
+#app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* Header */
+#site-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  height: var(--header-h);
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 20px;
+  box-shadow: 0 1px 0 var(--border);
+}
+
+#site-header h1 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Content area */
+#content-area {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Sidebar */
+#sidebar {
+  width: var(--sidebar-w);
+  flex-shrink: 0;
+  background: var(--bg-elev);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  position: sticky;
+  top: var(--header-h);
+  height: calc(100vh - var(--header-h));
+}
+
+#mindmap-container {
+  width: 100%;
+  height: 100%;
+  min-height: 300px;
+}
+
+#mindmap-container svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* TOC fallback (no-JS / markmap unavailable) */
+#toc-fallback {
+  padding: 16px;
+  list-style: none;
+}
+
+#toc-fallback li {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+#toc-fallback a {
+  color: var(--fg-muted);
+  text-decoration: none;
+  display: block;
+  padding: 3px 0;
+  border-radius: 4px;
+  padding-left: 8px;
+}
+
+#toc-fallback a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+#toc-fallback li.depth-2 { padding-left: 12px; }
+#toc-fallback li.depth-3 { padding-left: 24px; }
+
+/* Main content */
+#main-content {
+  flex: 1;
+  min-width: 0;
+  padding: 32px 48px;
+  max-width: 900px;
+}
+
+/* =========================================================
+   Tablet: 640–1023px — drawer + hamburger
+   ========================================================= */
+
+@media (max-width: 1023px) {
+  #sidebar {
+    position: fixed;
+    top: var(--header-h);
+    left: 0;
+    height: calc(100vh - var(--header-h));
+    transform: translateX(-100%);
+    transition: transform .22s ease;
+    z-index: 90;
+    box-shadow: var(--shadow);
+  }
+
+  #sidebar.drawer-open {
+    transform: translateX(0);
+  }
+
+  #drawer-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.35);
+    z-index: 89;
+  }
+
+  #drawer-backdrop.visible {
+    display: block;
+  }
+
+  #main-content {
+    padding: 24px 24px;
+  }
+
+  #hamburger-btn {
+    display: flex;
+  }
+}
+
+@media (min-width: 1024px) {
+  #hamburger-btn { display: none; }
+  #drawer-backdrop { display: none !important; }
+}
+
+/* =========================================================
+   Mobile: <640px — mindmap-first then section view
+   ========================================================= */
+
+@media (max-width: 639px) {
+  #sidebar {
+    position: fixed;
+    inset: 0;
+    top: var(--header-h);
+    width: 100%;
+    height: calc(100vh - var(--header-h));
+    transform: translateX(-100%);
+    transition: transform .22s ease;
+    z-index: 90;
+  }
+
+  #sidebar.mindmap-view {
+    transform: translateX(0);
+  }
+
+  #main-content {
+    padding: 16px;
+  }
+}
+
+/* =========================================================
+   Section cards
+   ========================================================= */
+
+.section-card {
+  margin-bottom: 2px;
+}
+
+.section-summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: background .12s ease, border-color .12s ease;
+}
+
+.section-summary:hover {
+  background: var(--accent-soft);
+  border-color: var(--border);
+}
+
+.section-summary::-webkit-details-marker { display: none; }
+.section-summary::marker { display: none; }
+
+details[open] > .section-summary {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.section-header-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.section-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  flex: 1;
+}
+
+.section-card details[open] .section-title {
+  color: var(--accent);
+}
+
+/* Level indentation */
+.section-card[data-level="2"] .section-title { padding-left: 12px; }
+.section-card[data-level="3"] .section-title { padding-left: 24px; }
+
+/* Tab availability dots */
+.tab-dots {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.tab-dot.available {
+  background: var(--accent);
+  opacity: .5;
+}
+
+/* TL;DR */
+.section-tldr {
+  font-style: italic;
+  font-size: 14px;
+  color: var(--fg-muted);
+  border-left: 3px solid var(--accent);
+  padding-left: 10px;
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+/* Enrichment failed marker */
+.enrich-error {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f08c00;
+  vertical-align: middle;
+  margin-left: 6px;
+  title: "Enrichment failed";
+}
+
+/* =========================================================
+   Section body (expanded)
+   ========================================================= */
+
+.section-body {
+  border: 1px solid var(--accent);
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  padding: 0 16px 16px;
+  background: var(--bg-elev);
+}
+
+/* Tab strip */
+.tab-strip {
+  display: flex;
+  gap: 2px;
+  padding: 10px 0 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.tab-btn {
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg-muted);
+  background: none;
+  border: none;
+  padding: 4px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background .1s, color .1s;
+  white-space: nowrap;
+}
+
+.tab-btn:hover {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.tab-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tab-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Tab panels */
+.tab-panel {
+  display: none;
+}
+
+.tab-panel.active {
+  display: block;
+}
+
+/* =========================================================
+   Prose (markdown-it rendered)
+   ========================================================= */
+
+.prose {
+  max-width: 68ch;
+  color: var(--fg);
+}
+
+.prose h1, .prose h2, .prose h3, .prose h4 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin-top: 1.5em;
+  margin-bottom: .5em;
+  line-height: 1.3;
+  color: var(--fg);
+}
+
+.prose h1 { font-size: 1.5rem; }
+.prose h2 { font-size: 1.25rem; }
+.prose h3 { font-size: 1.05rem; }
+.prose h4 { font-size: 1rem; }
+
+.prose p { margin-bottom: .9em; }
+
+.prose ul, .prose ol {
+  padding-left: 1.5em;
+  margin-bottom: .9em;
+}
+
+.prose li { margin-bottom: .2em; }
+
+.prose code {
+  font-family: var(--mono);
+  font-size: 13px;
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--accent);
+}
+
+.prose pre {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin-bottom: 1em;
+}
+
+.prose pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.prose blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: 14px;
+  color: var(--fg-muted);
+  font-style: italic;
+  margin: .8em 0;
+}
+
+.prose a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.prose a:hover {
+  text-decoration: underline;
+}
+
+.prose table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: 1em;
+  font-size: 14px;
+}
+
+.prose th, .prose td {
+  border: 1px solid var(--border);
+  padding: 7px 12px;
+  text-align: left;
+}
+
+.prose th {
+  background: var(--bg);
+  font-weight: 600;
+}
+
+.prose hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.5em 0;
+}
+
+/* ELI5 panel */
+.eli5-text {
+  max-width: 60ch;
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--fg);
+  white-space: pre-wrap;
+}
+
+/* Questions panel */
+.questions-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.questions-list li {
+  font-size: 14px;
+  color: var(--fg);
+  padding: 10px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  line-height: 1.5;
+}
+
+.questions-list li::before {
+  content: "?";
+  font-weight: 700;
+  color: var(--accent);
+  margin-right: 8px;
+}
+
+/* =========================================================
+   Diagrams
+   ========================================================= */
+
+.diagram-wrap {
+  position: relative;
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-elev);
+}
+
+.diagram-wrap svg {
+  display: block;
+  max-width: 100%;
+  cursor: zoom-in;
+}
+
+.diagram-click-hint {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 7px;
+  pointer-events: none;
+  opacity: 0.8;
+}
+
+/* Diagram zoom modal */
+#diagram-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0,0,0,.7);
+  align-items: center;
+  justify-content: center;
+}
+
+#diagram-modal.open {
+  display: flex;
+}
+
+#diagram-modal-inner {
+  position: relative;
+  background: var(--bg-elev);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 60px rgba(0,0,0,.4);
+  max-width: 92vw;
+  max-height: 88vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+#diagram-modal-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  font-size: 18px;
+  line-height: 1;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--fg-muted);
+  z-index: 1;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+#diagram-modal-close:hover { color: var(--fg); }
+#diagram-modal-close:focus-visible { outline: 2px solid var(--accent); }
+
+#diagram-modal-svg-wrap {
+  overflow: hidden;
+  flex: 1;
+  min-height: 200px;
+  min-width: 400px;
+  padding: 24px;
+}
+
+#diagram-modal-svg-wrap svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* =========================================================
+   Search
+   ========================================================= */
+
+#search-input {
+  font-family: var(--sans);
+  font-size: 13px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  width: 180px;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+
+#search-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+#search-input::placeholder {
+  color: var(--fg-muted);
+}
+
+/* =========================================================
+   Buttons (header controls)
+   ========================================================= */
+
+.icon-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  font-family: var(--sans);
+  color: var(--fg-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  transition: background .1s, color .1s, border-color .1s;
+  white-space: nowrap;
+}
+
+.icon-btn:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+#hamburger-btn {
+  /* visibility is owned by the media-query rules above (hidden on desktop, flex on tablet/mobile) */
+  font-size: 18px;
+  padding: 4px 8px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--fg-muted);
+}
+
+#hamburger-btn:hover { color: var(--fg); }
+#hamburger-btn:focus-visible { outline: 2px solid var(--accent); }
+
+/* =========================================================
+   Glossary section
+   ========================================================= */
+
+#glossary-section {
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+#glossary-section h2 {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  margin-bottom: 16px;
+}
+
+.glossary-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.glossary-entry {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 12px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.glossary-term {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.glossary-def {
+  color: var(--fg-muted);
+}
+
+@media (max-width: 639px) {
+  .glossary-entry {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}
+
+/* =========================================================
+   Footer
+   ========================================================= */
+
+#site-footer {
+  margin-top: 48px;
+  padding: 16px 48px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+/* =========================================================
+   Empty / no-data states
+   ========================================================= */
+
+.no-data {
+  font-size: 13px;
+  color: var(--fg-muted);
+  font-style: italic;
+  padding: 8px 0;
+}
+
+/* =========================================================
+   Print
+   ========================================================= */
+
+@media print {
+  #site-header,
+  #sidebar,
+  #drawer-backdrop,
+  .tab-strip,
+  .diagram-click-hint,
+  #diagram-modal,
+  #search-input,
+  .icon-btn,
+  #hamburger-btn {
+    display: none !important;
+  }
+
+  #content-area {
+    display: block;
+  }
+
+  #main-content {
+    padding: 0;
+    max-width: 100%;
+  }
+
+  details {
+    display: block !important;
+  }
+
+  details > .section-body {
+    display: block !important;
+  }
+
+  .section-summary {
+    background: none !important;
+    border: none !important;
+    padding: 0 !important;
+  }
+
+  .tab-panel {
+    display: block !important;
+  }
+
+  .tab-panel + .tab-panel {
+    margin-top: 12px;
+    border-top: 1px solid #ccc;
+    padding-top: 12px;
+  }
+
+  .section-card {
+    page-break-before: always;
+  }
+
+  .section-card:first-child {
+    page-break-before: avoid;
+  }
+
+  body {
+    background: #fff;
+    color: #000;
+  }
+
+  .prose a::after {
+    content: " (" attr(href) ")";
+    font-size: .85em;
+    color: #555;
+  }
+}
+
+</style>
+</head>
+<body>
+
+<div id="app-shell">
+
+  <!-- =========================================================
+       Header
+       ========================================================= -->
+  <header id="site-header" role="banner">
+    <button id="hamburger-btn" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+    <h1>Plan: `primer` — interactive plan/doc explainer</h1>
+    <div class="header-controls">
+      <input
+        id="search-input"
+        type="search"
+        placeholder="Search… (/)"
+        aria-label="Search sections"
+        autocomplete="off"
+      >
+      <button id="dark-toggle" class="icon-btn" aria-label="Toggle dark mode">
+        <span id="dark-toggle-icon">☾</span>
+      </button>
+      <button id="print-btn" class="icon-btn" aria-label="Print">Print</button>
+    </div>
+  </header>
+
+  <!-- Backdrop for drawer (tablet) -->
+  <div id="drawer-backdrop" aria-hidden="true"></div>
+
+  <!-- =========================================================
+       Content area
+       ========================================================= -->
+  <div id="content-area">
+
+    <!-- Sidebar / mindmap -->
+    <nav id="sidebar" aria-label="Document map">
+      <div id="mindmap-container" aria-label="Mind map" role="img">
+        <!-- markmap renders here; fallback below -->
+        <ul id="toc-fallback" aria-label="Table of contents">
+          <!-- Populated by app.js if markmap unavailable -->
+        </ul>
+      </div>
+    </nav>
+
+    <!-- Main content -->
+    <main id="main-content" role="main">
+
+      <!-- Sections list -->
+      <div id="sections-container" role="list" aria-label="Document sections">
+        <!-- Populated by app.js -->
+        <noscript>
+          <p style="padding:16px;color:#555">
+            JavaScript is required to render this document interactively.
+            Enable JS or open the source markdown directly.
+          </p>
+        </noscript>
+      </div>
+
+      <!-- Glossary -->
+      <section id="glossary-section" aria-labelledby="glossary-heading">
+        <h2 id="glossary-heading">Glossary</h2>
+        <dl class="glossary-list" id="glossary-list">
+          <!-- Populated by app.js -->
+        </dl>
+      </section>
+
+      <!-- Footer -->
+      <footer id="site-footer">
+        Generated <time>2026-05-02T20:02:51.135Z</time> &middot; primer
+      </footer>
+
+    </main>
+  </div><!-- #content-area -->
+
+</div><!-- #app-shell -->
+
+<!-- Diagram zoom modal -->
+<div id="diagram-modal" role="dialog" aria-modal="true" aria-label="Diagram zoom">
+  <div id="diagram-modal-inner">
+    <button id="diagram-modal-close" aria-label="Close diagram">&#x2715;</button>
+    <div id="diagram-modal-svg-wrap"></div>
+  </div>
+</div>
+
+<!-- Inlined app JS (agent substitutes app.js content here) -->
+<script>
+/* primer — app.js
+   Vanilla JS + Alpine 3.14
+   No build step. Runs as-is in the browser.
+*/
+
+(function () {
+  'use strict';
+
+  /* =========================================================
+     Constants
+     ========================================================= */
+
+  const HASH16 = 'c20b9a37c6d72d3b';
+  const LS_KEY = 'primer:' + HASH16;
+
+  const TAB_NAMES = ['original', 'eli5', 'questions', 'diagram'];
+  const TAB_LABELS = { original: 'Original', eli5: 'ELI5', questions: 'Questions', diagram: 'Diagram' };
+
+  /* =========================================================
+     Data loading
+     ========================================================= */
+
+  function loadJson(id) {
+    const el = document.getElementById(id);
+    if (!el) return null;
+    try { return JSON.parse(el.textContent); } catch (e) { return null; }
+  }
+
+  const sections = loadJson('primer-sections') || [];
+  const mindmapData = loadJson('primer-mindmap');
+  const glossary = loadJson('primer-glossary') || [];
+
+  /* =========================================================
+     Persistence
+     ========================================================= */
+
+  function loadState() {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch (_) {}
+    return { darkMode: null, expandedSections: [], lastSection: null };
+  }
+
+  function saveState(patch) {
+    try {
+      const current = loadState();
+      localStorage.setItem(LS_KEY, JSON.stringify(Object.assign(current, patch)));
+    } catch (_) {}
+  }
+
+  /* =========================================================
+     Dark mode
+     ========================================================= */
+
+  const state = loadState();
+
+  function applyDarkMode(dark) {
+    if (dark) {
+      document.body.classList.add('dark');
+    } else {
+      document.body.classList.remove('dark');
+    }
+  }
+
+  // Determine initial dark mode
+  let isDark = false;
+  if (state.darkMode !== null) {
+    isDark = state.darkMode;
+  } else {
+    isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+  applyDarkMode(isDark);
+
+  /* =========================================================
+     URL params
+     ========================================================= */
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const isPrintMode = urlParams.get('print') === '1';
+
+  /* =========================================================
+     Markdown renderer
+     ========================================================= */
+
+  let md = null;
+
+  function renderMarkdown(text) {
+    if (!text) return '';
+    if (!md && window.markdownit) {
+      md = window.markdownit({ html: false, linkify: true, typographer: true });
+    }
+    if (md) return md.render(text);
+    // Fallback: plain text in a pre
+    return '<pre>' + escapeHtml(text) + '</pre>';
+  }
+
+  function escapeHtml(str) {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  /* =========================================================
+     Mindmap — markmap
+     ========================================================= */
+
+  function buildHeadingTree(secs) {
+    const root = { id: 'root', label: document.title || 'Contents', children: [] };
+    secs.forEach(function (s) {
+      const node = { id: s.id, label: s.title, children: [] };
+      if (s.level === 1 || root.children.length === 0) {
+        root.children.push(node);
+      } else {
+        const last = root.children[root.children.length - 1];
+        last.children = last.children || [];
+        last.children.push(node);
+      }
+    });
+    return root;
+  }
+
+  function isFlatTree(tree) {
+    if (!tree || !tree.children || tree.children.length === 0) return true;
+    return tree.children.every(function (c) { return !c.children || c.children.length === 0; });
+  }
+
+  function buildFlatToc(secs) {
+    return { id: 'root', label: document.title || 'Contents', children: secs.map(function (s) {
+      return { id: s.id, label: s.title };
+    })};
+  }
+
+  function resolveTree() {
+    if (mindmapData && mindmapData.id === 'root' && mindmapData.children && mindmapData.children.length > 0) {
+      return mindmapData;
+    }
+    const ht = buildHeadingTree(sections);
+    if (isFlatTree(ht)) return buildFlatToc(sections);
+    return ht;
+  }
+
+  function treeToMarkmap(node) {
+    // Convert our tree to markmap format
+    return {
+      content: node.label,
+      children: (node.children || []).map(treeToMarkmap)
+    };
+  }
+
+  function initMindmap() {
+    const container = document.getElementById('mindmap-container');
+    if (!container) return;
+
+    const tree = resolveTree();
+
+    // markmap-autoloader exposes window.markmap with capital-T `Transformer`
+    if (window.markmap && window.markmap.Markmap && window.markmap.Transformer) {
+      try {
+        const { Markmap } = window.markmap;
+        // Build markmap-compatible tree
+        const mmTree = treeToMarkmap(tree);
+
+        const svg = container.querySelector('svg') || document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        if (!container.querySelector('svg')) {
+          svg.setAttribute('style', 'width:100%;height:100%');
+          container.appendChild(svg);
+        }
+
+        const mm = Markmap.create(svg, {
+          autoFit: true,
+          color: function () { return 'var(--accent)'; }
+        }, mmTree);
+
+        // Click a node → scroll to section. Markmap renders labels as either <text>
+        // or <foreignObject> depending on version/content; accept both.
+        svg.addEventListener('click', function (e) {
+          const labelEl = e.target.closest('text, foreignObject');
+          if (!labelEl) return;
+          const label = labelEl.textContent.trim();
+          const sec = sections.find(function (s) { return s.title === label; });
+          if (sec) scrollToSection(sec.id);
+        });
+
+        // Close mobile drawer on node click
+        svg.addEventListener('click', function () {
+          closeMobileDrawer();
+        });
+
+        return;
+      } catch (_) {}
+    }
+
+    // Fallback to TOC list
+    renderTocFallback(tree);
+  }
+
+  function renderTocFallback(_tree) {
+    // Mindmap tree labels are logical groupings that may not match section titles 1:1,
+    // so the flat TOC iterates the sections array directly — that's the only mapping
+    // guaranteed to produce live anchors.
+    const nav = document.getElementById('toc-fallback');
+    if (!nav) return;
+    nav.innerHTML = '';
+    sections.forEach(function (sec) {
+      const li = document.createElement('li');
+      li.className = 'depth-' + Math.max(1, sec.level || 1);
+      const a = document.createElement('a');
+      a.href = '#section-' + sec.id;
+      a.textContent = sec.title;
+      a.addEventListener('click', function () { closeMobileDrawer(); });
+      li.appendChild(a);
+      nav.appendChild(li);
+    });
+  }
+
+  /* =========================================================
+     Section rendering
+     ========================================================= */
+
+  function sectionHasTab(sec, tab) {
+    switch (tab) {
+      case 'original': return true; // always has body
+      case 'eli5':     return !!sec.eli5;
+      case 'questions': return sec.questions && sec.questions.length > 0;
+      case 'diagram':   return sec.diagrams && sec.diagrams.length > 0;
+      default: return false;
+    }
+  }
+
+  function buildTabDots(sec) {
+    return TAB_NAMES.map(function (t) {
+      const avail = sectionHasTab(sec, t);
+      return '<span class="tab-dot' + (avail ? ' available' : '') + '" aria-label="' + TAB_LABELS[t] + (avail ? ' available' : ' unavailable') + '"></span>';
+    }).join('');
+  }
+
+  function buildTabStrip(sec, sectionIdx) {
+    const available = TAB_NAMES.filter(function (t) { return sectionHasTab(sec, t); });
+    return available.map(function (t, i) {
+      return '<button class="tab-btn' + (i === 0 ? ' active' : '') + '" data-tab="' + t + '" aria-selected="' + (i === 0) + '">' + TAB_LABELS[t] + '</button>';
+    }).join('');
+  }
+
+  function buildOriginalPanel(sec) {
+    return '<div class="tab-panel active" data-panel="original"><div class="prose">' + renderMarkdown(sec.bodyMd) + '</div></div>';
+  }
+
+  function buildEli5Panel(sec) {
+    if (!sec.eli5) return '';
+    return '<div class="tab-panel" data-panel="eli5"><div class="eli5-text">' + escapeHtml(sec.eli5) + '</div></div>';
+  }
+
+  function buildQuestionsPanel(sec) {
+    if (!sec.questions || !sec.questions.length) return '';
+    const items = sec.questions.map(function (q) {
+      return '<li>' + escapeHtml(q) + '</li>';
+    }).join('');
+    return '<div class="tab-panel" data-panel="questions"><ul class="questions-list">' + items + '</ul></div>';
+  }
+
+  function buildDiagramPanel(sec) {
+    if (!sec.diagrams || !sec.diagrams.length) return '';
+    const diagramHtml = sec.diagrams.map(function (d, i) {
+      const uid = sec.id + '-diag-' + i;
+      return '<div class="diagram-wrap" data-diagram-uid="' + uid + '" data-inferred="' + d.inferred + '">' +
+        '<div class="mermaid-src" style="display:none">' + escapeHtml(d.code) + '</div>' +
+        '<div class="mermaid-output" id="mermaid-' + uid + '"></div>' +
+        '<span class="diagram-click-hint">Click to zoom</span>' +
+        '</div>';
+    }).join('');
+    return '<div class="tab-panel" data-panel="diagram">' + diagramHtml + '</div>';
+  }
+
+  function buildSectionCard(sec, idx) {
+    const errorMark = sec.error ? '<span class="enrich-error" title="Enrichment failed"></span>' : '';
+    const tldrHtml = sec.tldr
+      ? '<div class="section-tldr">' + escapeHtml(sec.tldr) + '</div>'
+      : '';
+
+    const tabs = buildTabStrip(sec, idx);
+    const panels = [
+      buildOriginalPanel(sec),
+      buildEli5Panel(sec),
+      buildQuestionsPanel(sec),
+      buildDiagramPanel(sec)
+    ].join('');
+
+    const isExpanded = state.expandedSections && state.expandedSections.includes(sec.id);
+    const openAttr = (isPrintMode || isExpanded) ? ' open' : '';
+
+    return '<div class="section-card" id="section-' + sec.id + '" data-section-id="' + sec.id + '" data-level="' + sec.level + '">' +
+      '<details' + openAttr + '>' +
+      '<summary class="section-summary" aria-label="' + escapeHtml(sec.title) + '">' +
+        '<div class="section-header-row">' +
+          '<span class="section-title">' + escapeHtml(sec.title) + errorMark + '</span>' +
+          '<div class="tab-dots" aria-hidden="true">' + buildTabDots(sec) + '</div>' +
+        '</div>' +
+        tldrHtml +
+      '</summary>' +
+      '<div class="section-body">' +
+        '<div class="tab-strip" role="tablist" aria-label="Section views">' + tabs + '</div>' +
+        '<div class="tab-panels">' + panels + '</div>' +
+      '</div>' +
+      '</details>' +
+    '</div>';
+  }
+
+  /* =========================================================
+     Render sections
+     ========================================================= */
+
+  let filteredSections = sections.slice();
+
+  function renderSections(secs) {
+    const container = document.getElementById('sections-container');
+    if (!container) return;
+    container.innerHTML = secs.map(buildSectionCard).join('');
+    attachSectionEvents(container);
+    // Render diagrams for initially expanded sections
+    container.querySelectorAll('details[open]').forEach(function (det) {
+      const diag = det.querySelector('[data-panel="diagram"].active') ||
+                   det.querySelector('[data-panel="diagram"]');
+      // Only render if diagram tab is active
+      const activePanel = det.querySelector('.tab-panel.active');
+      if (activePanel && activePanel.dataset.panel === 'diagram') {
+        runDiagramsIn(det);
+      }
+    });
+  }
+
+  function attachSectionEvents(container) {
+    // Tab switching within each section
+    container.querySelectorAll('.tab-strip').forEach(function (strip) {
+      strip.addEventListener('click', function (e) {
+        const btn = e.target.closest('.tab-btn');
+        if (!btn) return;
+        switchTab(strip, btn.dataset.tab);
+      });
+    });
+
+    // Track open/close for persistence
+    container.querySelectorAll('details').forEach(function (det) {
+      det.addEventListener('toggle', function () {
+        const card = det.closest('.section-card');
+        if (!card) return;
+        const id = card.dataset.sectionId;
+        const expanded = loadState().expandedSections || [];
+        if (det.open) {
+          if (!expanded.includes(id)) expanded.push(id);
+          saveState({ expandedSections: expanded, lastSection: id });
+          // Activate first available tab's diagram if diagram tab is first active
+          const activePanel = det.querySelector('.tab-panel.active');
+          if (activePanel && activePanel.dataset.panel === 'diagram') {
+            runDiagramsIn(det);
+          }
+        } else {
+          const idx = expanded.indexOf(id);
+          if (idx >= 0) expanded.splice(idx, 1);
+          saveState({ expandedSections: expanded });
+        }
+      });
+    });
+
+    // Diagram click → modal
+    container.addEventListener('click', function (e) {
+      const wrap = e.target.closest('.diagram-wrap');
+      if (!wrap) return;
+      const svg = wrap.querySelector('.mermaid-output svg');
+      if (!svg) return;
+      openDiagramModal(svg);
+    });
+  }
+
+  function switchTab(strip, tabName) {
+    const body = strip.closest('.section-body');
+    if (!body) return;
+
+    // Update buttons
+    strip.querySelectorAll('.tab-btn').forEach(function (btn) {
+      const active = btn.dataset.tab === tabName;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-selected', active);
+    });
+
+    // Update panels
+    body.querySelectorAll('.tab-panel').forEach(function (panel) {
+      const active = panel.dataset.panel === tabName;
+      panel.classList.toggle('active', active);
+    });
+
+    // Render mermaid if switching to diagram tab
+    if (tabName === 'diagram') {
+      runDiagramsIn(strip.closest('details'));
+    }
+  }
+
+  /* =========================================================
+     Mermaid diagram rendering
+     ========================================================= */
+
+  const renderedDiagrams = new Set();
+
+  function runDiagramsIn(detailsEl) {
+    if (!detailsEl) return;
+    const wraps = detailsEl.querySelectorAll('.diagram-wrap');
+    wraps.forEach(function (wrap) {
+      const uid = wrap.dataset.diagramUid;
+      if (renderedDiagrams.has(uid)) return;
+      renderedDiagrams.add(uid);
+
+      const srcEl = wrap.querySelector('.mermaid-src');
+      const outEl = wrap.querySelector('.mermaid-output');
+      if (!srcEl || !outEl) return;
+
+      const code = srcEl.textContent;
+      const isInferred = wrap.dataset.inferred === 'true';
+
+      renderOneMermaid(uid, code, outEl, isInferred);
+    });
+  }
+
+  function renderOneMermaid(uid, code, outEl, isInferred) {
+    if (!window.mermaid) return;
+    const id = 'mmd-' + uid.replace(/[^a-z0-9]/gi, '-');
+
+    mermaid.render(id, code).then(function (result) {
+      outEl.innerHTML = result.svg;
+      const svg = outEl.querySelector('svg');
+      if (!svg) return;
+      svg.style.maxWidth = '100%';
+      svg.style.height = 'auto';
+
+      if (isInferred) {
+        addInferredBadge(svg);
+      }
+    }).catch(function (err) {
+      outEl.innerHTML = '<div class="no-data">Diagram could not be rendered: ' + escapeHtml(String(err)) + '</div>';
+    });
+  }
+
+  function addInferredBadge(svg) {
+    // Add a <text> element in the top-right corner of the SVG viewport
+    const ns = 'http://www.w3.org/2000/svg';
+
+    // Get viewBox dimensions or fallback to width/height attributes
+    let vw = parseFloat(svg.getAttribute('width')) || 600;
+    let vh = parseFloat(svg.getAttribute('height')) || 400;
+    const vb = svg.getAttribute('viewBox');
+    if (vb) {
+      const parts = vb.split(/[\s,]+/);
+      if (parts.length >= 4) {
+        vw = parseFloat(parts[2]) || vw;
+        vh = parseFloat(parts[3]) || vh;
+      }
+    }
+
+    const rect = document.createElementNS(ns, 'rect');
+    rect.setAttribute('x', vw - 120);
+    rect.setAttribute('y', 6);
+    rect.setAttribute('width', 110);
+    rect.setAttribute('height', 20);
+    rect.setAttribute('rx', '4');
+    rect.setAttribute('fill', '#5e6ad2');
+    rect.setAttribute('fill-opacity', '0.9');
+
+    const text = document.createElementNS(ns, 'text');
+    text.setAttribute('x', vw - 65);
+    text.setAttribute('y', 20);
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('font-family', 'Inter, system-ui, sans-serif');
+    text.setAttribute('font-size', '11');
+    text.setAttribute('fill', '#ffffff');
+    text.setAttribute('font-weight', '500');
+    text.textContent = 'AI-inferred';
+
+    svg.appendChild(rect);
+    svg.appendChild(text);
+  }
+
+  /* =========================================================
+     Diagram zoom modal
+     ========================================================= */
+
+  let panzoomInstance = null;
+
+  function openDiagramModal(originalSvg) {
+    const modal = document.getElementById('diagram-modal');
+    const wrap = document.getElementById('diagram-modal-svg-wrap');
+    if (!modal || !wrap) return;
+
+    // Clone SVG so panzoom doesn't mutate the inline one
+    const clone = originalSvg.cloneNode(true);
+    clone.removeAttribute('width');
+    clone.removeAttribute('height');
+    clone.style.width = '100%';
+    clone.style.height = 'auto';
+
+    wrap.innerHTML = '';
+    wrap.appendChild(clone);
+
+    modal.classList.add('open');
+    document.body.style.overflow = 'hidden';
+
+    // Init panzoom
+    if (window.panzoom) {
+      if (panzoomInstance) panzoomInstance.dispose();
+      panzoomInstance = panzoom(clone, {
+        maxZoom: 8,
+        minZoom: 0.3,
+        bounds: false
+      });
+    }
+
+    // Focus close button for a11y
+    const closeBtn = document.getElementById('diagram-modal-close');
+    if (closeBtn) closeBtn.focus();
+  }
+
+  function closeDiagramModal() {
+    const modal = document.getElementById('diagram-modal');
+    if (!modal) return;
+    modal.classList.remove('open');
+    document.body.style.overflow = '';
+    if (panzoomInstance) {
+      panzoomInstance.dispose();
+      panzoomInstance = null;
+    }
+  }
+
+  /* =========================================================
+     Search
+     ========================================================= */
+
+  function applySearch(query) {
+    const q = query.trim().toLowerCase();
+    if (!q) {
+      filteredSections = sections.slice();
+    } else {
+      filteredSections = sections.filter(function (s) {
+        return s.title.toLowerCase().includes(q) ||
+          (s.bodyMd && s.bodyMd.toLowerCase().includes(q)) ||
+          (s.tldr && s.tldr.toLowerCase().includes(q));
+      });
+    }
+    renderSections(filteredSections);
+  }
+
+  /* =========================================================
+     Keyboard navigation
+     ========================================================= */
+
+  function getVisibleSections() {
+    return Array.from(document.querySelectorAll('.section-card'));
+  }
+
+  function currentFocusedSection() {
+    const focused = document.activeElement;
+    if (!focused) return null;
+    return focused.closest('.section-card');
+  }
+
+  function scrollToSection(id) {
+    const el = document.getElementById('section-' + id);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const summary = el.querySelector('.section-summary');
+      if (summary) summary.focus();
+    }
+  }
+
+  function moveSectionFocus(dir) {
+    const cards = getVisibleSections();
+    if (!cards.length) return;
+    const current = currentFocusedSection();
+    let idx = current ? cards.indexOf(current) : -1;
+    idx += dir;
+    idx = Math.max(0, Math.min(cards.length - 1, idx));
+    const target = cards[idx];
+    const summary = target.querySelector('.section-summary');
+    if (summary) {
+      summary.focus();
+      target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
+
+  function switchActiveTab(n) {
+    // 1-based: 1=original, 2=eli5, 3=questions, 4=diagram
+    const focused = document.activeElement;
+    if (!focused) return;
+    const card = focused.closest('.section-card') || getVisibleSections()[0];
+    if (!card) return;
+    const strip = card.querySelector('.tab-strip');
+    if (!strip) return;
+    const btns = Array.from(strip.querySelectorAll('.tab-btn'));
+    if (n >= 1 && n <= btns.length) {
+      btns[n - 1].click();
+      btns[n - 1].focus();
+    }
+  }
+
+  document.addEventListener('keydown', function (e) {
+    // Don't intercept when typing in search
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+      if (e.key === 'Escape') e.target.blur();
+      return;
+    }
+
+    switch (e.key) {
+      case '/':
+        e.preventDefault();
+        const si = document.getElementById('search-input');
+        if (si) si.focus();
+        break;
+      case 'Escape':
+        closeDiagramModal();
+        break;
+      case 'd':
+        toggleDarkMode();
+        break;
+      case 'j':
+        e.preventDefault();
+        moveSectionFocus(1);
+        break;
+      case 'k':
+        e.preventDefault();
+        moveSectionFocus(-1);
+        break;
+      case '1': switchActiveTab(1); break;
+      case '2': switchActiveTab(2); break;
+      case '3': switchActiveTab(3); break;
+      case '4': switchActiveTab(4); break;
+    }
+  });
+
+  /* =========================================================
+     Dark mode toggle
+     ========================================================= */
+
+  function toggleDarkMode() {
+    isDark = !isDark;
+    applyDarkMode(isDark);
+    saveState({ darkMode: isDark });
+    updateDarkToggleLabel();
+  }
+
+  function updateDarkToggleLabel() {
+    const btn = document.getElementById('dark-toggle');
+    if (btn) btn.setAttribute('aria-label', isDark ? 'Switch to light mode' : 'Switch to dark mode');
+    const icon = document.getElementById('dark-toggle-icon');
+    if (icon) icon.textContent = isDark ? '☼' : '☾';
+  }
+
+  /* =========================================================
+     Hamburger / drawer
+     ========================================================= */
+
+  function openDrawer() {
+    const sidebar = document.getElementById('sidebar');
+    const backdrop = document.getElementById('drawer-backdrop');
+    if (sidebar) sidebar.classList.add('drawer-open');
+    if (backdrop) backdrop.classList.add('visible');
+  }
+
+  function closeDrawer() {
+    const sidebar = document.getElementById('sidebar');
+    const backdrop = document.getElementById('drawer-backdrop');
+    if (sidebar) sidebar.classList.remove('drawer-open');
+    if (backdrop) backdrop.classList.remove('visible');
+  }
+
+  function closeMobileDrawer() {
+    // On mobile (<640px) the sidebar covers the full screen
+    if (window.innerWidth < 640) {
+      const sidebar = document.getElementById('sidebar');
+      if (sidebar) sidebar.classList.remove('mindmap-view', 'drawer-open');
+    } else {
+      closeDrawer();
+    }
+  }
+
+  /* =========================================================
+     Glossary
+     ========================================================= */
+
+  function renderGlossary() {
+    const container = document.getElementById('glossary-list');
+    if (!container) return;
+    if (!glossary || !glossary.length) {
+      const section = document.getElementById('glossary-section');
+      if (section) section.style.display = 'none';
+      return;
+    }
+    container.innerHTML = glossary.map(function (entry) {
+      return '<div class="glossary-entry">' +
+        '<dt class="glossary-term">' + escapeHtml(entry.term) + '</dt>' +
+        '<dd class="glossary-def">' + escapeHtml(entry.definition) + '</dd>' +
+        '</div>';
+    }).join('');
+  }
+
+  /* =========================================================
+     Print mode
+     ========================================================= */
+
+  async function preparePrint() {
+    if (!isPrintMode) return;
+
+    // Expand all sections
+    document.querySelectorAll('details').forEach(function (d) { d.open = true; });
+
+    // Switch all sections to show diagram tab if available, otherwise leave on original
+    // We want all panels visible for print — CSS handles this
+
+    // Render all diagrams
+    const allWraps = document.querySelectorAll('.diagram-wrap');
+    const renderPromises = [];
+
+    allWraps.forEach(function (wrap) {
+      const uid = wrap.dataset.diagramUid;
+      if (renderedDiagrams.has(uid)) return;
+      renderedDiagrams.add(uid);
+
+      const srcEl = wrap.querySelector('.mermaid-src');
+      const outEl = wrap.querySelector('.mermaid-output');
+      if (!srcEl || !outEl || !window.mermaid) return;
+
+      const code = srcEl.textContent;
+      const isInferred = wrap.dataset.inferred === 'true';
+      const id = 'mmd-' + uid.replace(/[^a-z0-9]/gi, '-');
+
+      renderPromises.push(
+        mermaid.render(id, code).then(function (result) {
+          outEl.innerHTML = result.svg;
+          const svg = outEl.querySelector('svg');
+          if (svg) {
+            svg.style.maxWidth = '100%';
+            svg.style.height = 'auto';
+            if (isInferred) addInferredBadge(svg);
+          }
+        }).catch(function () {})
+      );
+    });
+
+    await Promise.all(renderPromises);
+  }
+
+  /* =========================================================
+     Init
+     ========================================================= */
+
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: isDark ? 'dark' : 'default',
+    securityLevel: 'loose'
+  });
+
+  document.addEventListener('DOMContentLoaded', async function () {
+    // Wire dark toggle
+    const darkToggle = document.getElementById('dark-toggle');
+    if (darkToggle) {
+      darkToggle.addEventListener('click', toggleDarkMode);
+    }
+    updateDarkToggleLabel();
+
+    // Wire hamburger
+    const hamburger = document.getElementById('hamburger-btn');
+    if (hamburger) {
+      hamburger.addEventListener('click', function () {
+        const sidebar = document.getElementById('sidebar');
+        if (sidebar && sidebar.classList.contains('drawer-open')) {
+          closeDrawer();
+        } else {
+          openDrawer();
+        }
+      });
+    }
+
+    // Backdrop click closes drawer
+    const backdrop = document.getElementById('drawer-backdrop');
+    if (backdrop) {
+      backdrop.addEventListener('click', closeDrawer);
+    }
+
+    // Mobile: show mindmap button
+    const mindmapBtn = document.getElementById('mindmap-btn');
+    if (mindmapBtn) {
+      mindmapBtn.addEventListener('click', function () {
+        const sidebar = document.getElementById('sidebar');
+        if (sidebar) sidebar.classList.toggle('mindmap-view');
+      });
+    }
+
+    // Modal close
+    const modalClose = document.getElementById('diagram-modal-close');
+    if (modalClose) {
+      modalClose.addEventListener('click', closeDiagramModal);
+    }
+
+    const modal = document.getElementById('diagram-modal');
+    if (modal) {
+      modal.addEventListener('click', function (e) {
+        if (e.target === modal) closeDiagramModal();
+      });
+    }
+
+    // Search
+    const searchInput = document.getElementById('search-input');
+    if (searchInput) {
+      searchInput.addEventListener('input', function () {
+        applySearch(searchInput.value);
+      });
+    }
+
+    // Print button
+    const printBtn = document.getElementById('print-btn');
+    if (printBtn) {
+      printBtn.addEventListener('click', function () {
+        window.print();
+      });
+    }
+
+    // Render sections
+    renderSections(sections);
+
+    // Render glossary
+    renderGlossary();
+
+    // Init mindmap (defer slightly to let markmap-autoloader settle)
+    setTimeout(initMindmap, 100);
+
+    // Restore last section scroll
+    if (state.lastSection && !isPrintMode) {
+      setTimeout(function () {
+        const el = document.getElementById('section-' + state.lastSection);
+        if (el) el.scrollIntoView({ block: 'nearest' });
+      }, 200);
+    }
+
+    // Print mode
+    if (isPrintMode) {
+      await preparePrint();
+    }
+  });
+
+})();
+
+</script>
+
+</body>
+</html>
