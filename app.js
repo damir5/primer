@@ -96,7 +96,7 @@
   }
 
   function escapeHtml(str) {
-    return str
+    return String(str ?? '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
@@ -256,7 +256,16 @@
   function buildQuestionsPanel(sec) {
     if (!sec.questions || !sec.questions.length) return '';
     const items = sec.questions.map(function (q) {
-      return '<li>' + escapeHtml(q) + '</li>';
+      // Accept either a plain string or a {q, a} pair.
+      if (typeof q === 'string') return '<li>' + escapeHtml(q) + '</li>';
+      if (q && typeof q === 'object') {
+        const qt = escapeHtml(String(q.q ?? q.question ?? ''));
+        const at = q.a ?? q.answer;
+        return '<li><div class="question-q">' + qt + '</div>' +
+          (at ? '<div class="question-a">' + escapeHtml(String(at)) + '</div>' : '') +
+          '</li>';
+      }
+      return '';
     }).join('');
     return '<div class="tab-panel" data-panel="questions"><ul class="questions-list">' + items + '</ul></div>';
   }
@@ -265,9 +274,13 @@
     if (!sec.diagrams || !sec.diagrams.length) return '';
     const diagramHtml = sec.diagrams.map(function (d, i) {
       const uid = sec.id + '-diag-' + i;
+      // Accept either {code} (contract) or {mermaid} (alt) for the source.
+      const code = d.code ?? d.mermaid ?? '';
+      const caption = d.caption ? '<div class="diagram-caption">' + escapeHtml(d.caption) + '</div>' : '';
       return '<div class="diagram-wrap" data-diagram-uid="' + uid + '" data-inferred="' + d.inferred + '">' +
-        '<div class="mermaid-src" style="display:none">' + escapeHtml(d.code) + '</div>' +
+        '<div class="mermaid-src" style="display:none">' + escapeHtml(code) + '</div>' +
         '<div class="mermaid-output" id="mermaid-' + uid + '"></div>' +
+        caption +
         '<span class="diagram-click-hint">Click to zoom</span>' +
         '</div>';
     }).join('');
